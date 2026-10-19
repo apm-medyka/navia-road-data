@@ -1,0 +1,5 @@
+work/
+out/
+tmp_lines/
+*.pbf
+__pycache__/

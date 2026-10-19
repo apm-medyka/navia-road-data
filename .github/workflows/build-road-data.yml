@@ -1,0 +1,100 @@
+name: Build road data (Poland, weekly)
+
+on:
+  schedule:
+    - cron: "15 2 * * 1"   # Mondays 02:15 UTC (Geofabrik extract of Sunday evening)
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Geofabrik path (default: europe/poland)"
+        required: false
+        default: "europe/poland"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: road-data
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      REGION: ${{ github.event.inputs.region || 'europe/poland' }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install osmium and Python deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q osmium-tool
+          python3 -m pip install --quiet osmium shapely
+
+      - name: Download Geofabrik extract
+        run: |
+          mkdir -p work && cd work
+          curl -fsSL --retry 5 --retry-delay 30 -o region.osm.pbf "https://download.geofabrik.de/${REGION}-latest.osm.pbf"
+          curl -fsSL --retry 5 -o region.osm.pbf.md5 "https://download.geofabrik.de/${REGION}-latest.osm.pbf.md5"
+          echo "$(cut -d' ' -f1 region.osm.pbf.md5)  region.osm.pbf" | md5sum -c -
+          TS=$(osmium fileinfo -g header.option.osmosis_replication_timestamp region.osm.pbf)
+          DATA_DATE=${TS%%T*}
+          echo "DATA_DATE=${DATA_DATE}" >> "$GITHUB_ENV"
+          echo "TAG=data-${DATA_DATE//-/}" >> "$GITHUB_ENV"
+          ls -la region.osm.pbf; echo "data timestamp ${TS}"
+
+      - name: Filter tags used by Navia
+        run: cd work && ../tiler/filter.sh region.osm.pbf
+
+      - name: Build tiles
+        run: |
+          cd work
+          python3 ../tiler/build_tiles.py --roads roads.pbf --areas areas.pbf --out out --tmp tmp_lines \
+            --data-date "${DATA_DATE}" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/" | tee build.log
+          rm -rf tmp_lines
+          python3 ../tiler/report.py out/manifest.json | tee report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check GitHub limits
+        run: |
+          cd work/out
+          COUNT=$(ls *.zip | wc -l)
+          BIG=$(find . -name '*.zip' -size +1900M | wc -l)
+          echo "packs=${COUNT} over_limit=${BIG}"
+          test "$COUNT" -gt 0 && test "$COUNT" -lt 990 && test "$BIG" -eq 0
+
+      - name: Publish release
+        run: |
+          cd work/out
+          gh release delete "${TAG}" --cleanup-tag -y 2>/dev/null || true
+          NOTES=$(printf 'Navia offline road data, OSM state %s.\n\n%s\n\n© OpenStreetMap contributors, ODbL 1.0 — https://www.openstreetmap.org/copyright. Extract: Geofabrik GmbH.' "${DATA_DATE}" "$(cat ../report.md)")
+          # Draft first: the release only becomes "latest" once every pack is uploaded.
+          gh release create "${TAG}" --draft --title "Road data ${DATA_DATE}" --notes "${NOTES}"
+          ls *.zip | xargs -n 20 gh release upload "${TAG}" --clobber
+          gh release upload "${TAG}" manifest.json --clobber
+          gh release edit "${TAG}" --draft=false --latest
+
+      - name: Verify published assets
+        run: |
+          sleep 10
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/manifest.json" -o latest.json
+          python3 - <<'PY'
+          import json, os, subprocess
+          m = json.load(open("latest.json"))
+          tag = os.environ["TAG"]
+          assert m["data_date"] == os.environ["DATA_DATE"], (m["data_date"], os.environ["DATA_DATE"])
+          assets = json.loads(subprocess.check_output(["gh", "release", "view", tag, "--json", "assets"]))["assets"]
+          sizes = {a["name"]: a["size"] for a in assets}
+          missing = [p["name"] for p in m["packs"] if sizes.get(p["name"]) != p["size"]]
+          assert not missing, missing[:10]
+          print(f"OK: {len(m['packs'])} packs, {m['total_size']/1e6:.1f} MB, latest = {tag}")
+          PY
+
+      - name: Remove old data releases (keep 2)
+        run: |
+          gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^data-' | sort -r | tail -n +3 | while read -r t; do
+            echo "deleting ${t}"; gh release delete "$t" --cleanup-tag -y
+          done
