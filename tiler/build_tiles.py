@@ -44,10 +44,19 @@ WAY_PREFIXES = ("maxspeed:",)
 NODE_KEYS = {
     "highway", "traffic_calming", "railway", "amenity", "barrier", "enforcement", "traffic_sign",
     "traffic_sign:direction", "direction", "crossing", "crossing:signals", "give_way:direction",
-    "stop:direction", "traffic_signals:direction", "name", "maxspeed", "brand", "operator",
+    "stop:direction", "traffic_signals:direction", "name", "maxspeed", "brand", "operator", "city_limit",
 }
 POI_HIGHWAY = {"speed_camera", "stop", "give_way", "traffic_signals", "crossing", "rest_area"}
 AREA_LANDUSE = {"residential", "commercial", "retail", "industrial"}
+# format_version 2: settlement outlines for the built-up check (villages without landuse).
+AREA_PLACE = {"city", "town", "village", "hamlet", "suburb", "quarter", "neighbourhood"}
+
+
+def is_built_up_sign(tags):
+    """D-42 / D-43 built-up area signs (traffic_sign=city_limit, PL:D-42, PL:D-43)."""
+    signs = [t.strip() for t in tags.get("traffic_sign", "").replace(",", ";").split(";")]
+    return any(t == "city_limit" or t.startswith("PL:D-42") or t.startswith("PL:D-43") for t in signs) \
+        or tags.get("highway") == "city_limit" or tags.get("city_limit") in ("begin", "end")
 
 
 def cell(lat, lon):
@@ -77,6 +86,8 @@ def is_poi(tags):
     if tags.get("enforcement") == "maxspeed":
         return True
     if any(t.strip() == "PL:B-2" for t in tags.get("traffic_sign", "").split(";")):
+        return True
+    if is_built_up_sign(tags):
         return True
     return False
 
@@ -213,6 +224,8 @@ def process_areas(path, sink, stats):
             out_tags = {"type": "multipolygon", "landuse": tags["landuse"]}
         elif tags.get("boundary") == "administrative" and tags.get("admin_level") == "8" and not area.from_way():
             out_tags = {"type": "boundary", "boundary": "administrative", "admin_level": "8"}
+        elif tags.get("place") in AREA_PLACE:
+            out_tags = {"type": "multipolygon", "place": tags["place"]}
         else:
             continue
         try:
@@ -289,6 +302,9 @@ def build_packs(tmp, out, data_date, base_url):
     manifest = {
         "schema": 1,
         "format": "overpass-json-subtiles",
+        # Additive changes only: older launchers ignore the extra areas / nodes.
+        "format_version": 2,
+        "features": ["landuse", "town_boundary", "place", "built_up_signs"],
         "cell_deg": CELL,
         "pack_cells": PACK,
         "data_date": data_date,

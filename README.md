@@ -13,7 +13,9 @@ restrictions, built-up areas) for all of Poland, rebuilt every week by GitHub Ac
 * Each sub-tile is `{"elements": [...]}` in the format of an Overpass `out body geom` reply, limited to the
   tags the launcher reads (see `tiler/filter.sh` and `tiler/build_tiles.py`): drivable `highway` ways with
   `nodes` + `geometry`, traffic-POI nodes, `type=restriction` relations (via node), and landuse /
-  `admin_level=8` areas clipped to the sub-tile as synthetic multipolygon relations (negative ids).
+  `admin_level=8` areas and (format_version 2) `place` settlement polygons clipped to the sub-tile as
+  synthetic multipolygon relations (negative ids), plus D-42 / D-43 (`traffic_sign=city_limit`, `PL:D-42`,
+  `PL:D-43`) sign nodes. Format changes are additive: older launchers ignore what they do not know.
   A way is repeated in every sub-tile it crosses; the app deduplicates by id.
 * Zips are deterministic: an unchanged area keeps its `sha256`, so the app downloads only changed packs.
 
